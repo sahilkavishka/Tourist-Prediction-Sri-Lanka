@@ -3,131 +3,114 @@ import pickle
 import numpy as np
 import pandas as pd
 import time
+import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime
+from plotly.subplots import make_subplots
 
-# --- 1. LOAD THE SAVED FILES ---
+# ──────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Ceylon Forecast",
+    page_icon="🌊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ──────────────────────────────────────────────────────────────
+# GLOBAL CSS (Simplified for stability)
+# ──────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg: #080b12; --bg1: #0d1018; --bg2: #111520; --bg3: #161a28;
+  --border: #1c2030; --border2: #242840; --gold: #c9aa71; --gold2: #e8c980;
+  --gold-dim: rgba(201,170,113,0.12); --text: #ddd8ce; --text2: #8a8fa0;
+  --text3: #45495a; --teal: #38c4b4; --rose: #e06b6b; --radius: 10px;
+}
+
+[data-testid="stAppViewContainer"] { background: var(--bg) !important; color: var(--text) !important; font-family: 'DM Sans', sans-serif !important; }
+.hero-banner { background: linear-gradient(135deg, var(--bg1) 0%, var(--bg2) 60%, #0d1520 100%); border-bottom: 1px solid var(--border); padding: 3rem 2.5rem 2.5rem; position: relative; }
+.hero-title { font-family: 'Playfair Display', serif; font-size: 3rem; font-weight: 900; color: #f2ece0; line-height: 1.05; }
+.hero-title em { color: var(--gold); font-style: italic; }
+.result-mega { text-align: center; padding: 2.8rem 1.5rem; background: var(--bg3); border-top: 3px solid var(--gold); border-radius: var(--radius); }
+.result-mega-num { font-family: 'Playfair Display', serif; font-size: 4rem; color: var(--gold); }
+</style>
+""", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────
+# LOAD MODEL & ENCODERS
+# ──────────────────────────────────────────────────────────────
 @st.cache_resource
-def load_data():
-    """Load model and encoders with error handling"""
+def load_assets():
     try:
-        with open('tourist_model.pickle', 'rb') as file:
-            model = pickle.load(file)
-    except FileNotFoundError:
-        st.error("❌ Model file 'tourist_model.pickle' not found.")
+        with open("tourist_model.pickle", "rb") as f:
+            model = pickle.load(f)
+        with open("encoders.pickle", "rb") as f:
+            encoders = pickle.load(f)
+        return model, encoders
+    except FileNotFoundError as e:
+        st.error(f"❌ Required file missing: {e.filename}")
         return None, None
 
+assets = load_assets()
+if not assets[0]: st.stop()
+model, encoders = assets
+le_country = encoders["le_country"]
+
+MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+MONTH_MAP = {m: i+1 for i, m in enumerate(MONTHS)}
+
+def predict_arrivals(year, month_num, country_name, dollar, cpi):
+    # Encode country name to match training data
     try:
-        with open('encoders.pickle', 'rb') as file:
-            encoders = pickle.load(file)
-    except FileNotFoundError:
-        st.error("❌ Encoders file 'encoders.pickle' not found.")
-        return None, None
-
-    return model, encoders
-
-model, encoders = load_data()
-
-if model and encoders:
-    # Extract encoders from the dictionary saved in your training step
-    le_country = encoders["le_country"]
-
-    # --- 2. PAGE CONFIGURATION & STYLING ---
-    st.set_page_config(
-        page_title="Sri Lanka Tourist Predictor 2026",
-        page_icon="🌴",
-        layout="wide"
-    )
-
-    st.markdown("""
-        <style>
-        .main { background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); }
-        .stButton > button {
-            background: linear-gradient(135deg, #00b09b 0%, #96c93d 100%);
-            color: white; font-size: 18px; font-weight: 600;
-            border-radius: 12px; padding: 12px 28px; width: 100%;
-            border: none; box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        }
-        .metric-card {
-            background: white; padding: 25px; border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center;
-        }
-        h1 { background: linear-gradient(135deg, #00b09b 0%, #96c93d 100%);
-             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-             text-align: center; font-size: 42px; font-weight: 700; }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # --- SIDEBAR ---
-    st.sidebar.image("https://flagcdn.com/w320/lk.png", width=100)
-    st.sidebar.title("⚙️ Market Settings")
-    st.sidebar.info("Predicting tourist arrivals based on economic indicators.")
-
-    # --- MAIN PAGE ---
-    st.markdown("<h1> 🌴 Sri Lanka Tourist Predictor</h1>", unsafe_allow_html=True)
+        country_enc = le_country.transform([country_name])[0]
+    except ValueError:
+        # Fallback if country is not in the encoder (e.g., grouped as 'Other' during training)
+        country_enc = le_country.transform(['Other'])[0]
     
-    tab1, tab2, tab3 = st.tabs(["🔮 Prediction", "📈 Analysis", "ℹ️ Guide"])
+    # Feature order MUST match the order used during model.fit()
+    features = np.array([[year, month_num, country_enc, dollar, cpi]])
+    prediction = model.predict(features)[0]
+    return max(0, int(prediction))
 
-    with tab1:
-        with st.form("tourist_form"):
-            st.markdown("### 📋 Journey Details")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Use encoders.classes_ to populate the dropdown
-                country = st.selectbox("📍 Origin Country", le_country.classes_)
-                month = st.selectbox("📅 Month", 
-                    ['January', 'February', 'March', 'April', 'May', 'June', 
-                     'July', 'August', 'September', 'October', 'November', 'December'])
-                year = st.number_input("📅 Target Year", value=2026, min_value=2018)
+# ──────────────────────────────────────────────────────────────
+# UI SECTIONS
+# ──────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero-banner">
+    <div style="font-size: 0.65rem; letter-spacing: 0.3em; color: var(--gold);">Sri Lanka · Arrivals Intelligence</div>
+    <h1 class="hero-title">Tourist <em>Forecast</em><br>Engine</h1>
+</div>
+""", unsafe_allow_html=True)
 
-            with col2:
-                dollar_rate = st.number_input("💱 Dollar Rate (LKR)", value=300.0, step=1.0)
-                cpi = st.number_input("📉 Consumer Price Index", value=200.0, step=0.1)
+tab1, tab2 = st.tabs(["Forecast", "Analysis"])
 
-            submitted = st.form_submit_button("🚀 Calculate Forecast")
+with tab1:
+    with st.form("main_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1: country = st.selectbox("Origin Market", le_country.classes_)
+        with c2: month = st.selectbox("Arrival Month", MONTHS)
+        with c3: year = st.number_input("Target Year", 2018, 2040, 2026)
+        
+        c4, c5 = st.columns(2)
+        with c4: dollar = st.slider("LKR/USD Rate", 150.0, 600.0, 310.0)
+        with c5: cpi = st.slider("Consumer Price Index", 80.0, 450.0, 210.0)
+        
+        submit = st.form_submit_button("Run AI Projection")
 
-        if submitted:
-            with st.spinner("🔍 Simulating Arrivals..."):
-                time.sleep(0.5)
-                
-                # Preprocessing
-                month_map = {'January':1,'February':2,'March':3,'April':4,'May':5,'June':6,
-                             'July':7,'August':8,'September':9,'October':10,'November':11,'December':12}
-                
-                # Prepare Inputs (Ensure this matches the order in your X_train)
-                # Features used: ['year', 'month_num', 'country_encoded', 'dollarRate', 'consumerPriceIndex']
-                month_num = month_map[month]
-                country_enc = le_country.transform([country])[0]
-                
-                features = np.array([[year, month_num, country_enc, dollar_rate, cpi]])
-                prediction = model.predict(features)[0]
+    if submit:
+        val = predict_arrivals(year, MONTH_MAP[month], country, dollar, cpi)
+        
+        st.markdown(f"""
+        <div class="result-mega">
+            <div style="font-size: 0.7rem; letter-spacing: 0.2em; color: #8a8fa0; text-transform: uppercase;">Estimated Monthly Arrivals</div>
+            <div class="result-mega-num">{val:,}</div>
+            <div style="color: #45495a;">Visitors from {country} in {month} {year}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-                # --- DISPLAY RESULTS ---
-                st.markdown("### 📊 Predicted Monthly Arrivals")
-                col_res1, col_res2 = st.columns(2)
-                
-                with col_res1:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <h4 style="color: #666;">Estimated Arrivals</h4>
-                        <h1 style="color: #00b09b; font-size: 50px;">{int(prediction):,}</h1>
-                        <p>Expected visitors from {country}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
 
-                with col_res2:
-                    st.info("💡 Tip: Use these predictions to plan hotel capacity and service availability.")
 
-    with tab2:
-        st.markdown("### 📈 Market Trends")
-        st.write("This section can display historical trends from your `touristData.csv`.")
-
-    with tab3:
-        st.markdown("### ℹ️ How to Use")
-        st.write("1. Select the origin country. Note: Countries with very few historical records are grouped as **'Other'**.")
-        st.write("2. Input the expected dollar exchange rate and CPI.")
-        st.write("3. View the AI-generated prediction.")
-
-else:
-    st.error("⚠️ Ensure 'tourist_model.pickle' and 'encoders.pickle' are in the same folder as app.py.")
